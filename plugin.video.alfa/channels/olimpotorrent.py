@@ -42,439 +42,334 @@ canonical = {
     'alfa_s': True
 }
 
-host = canonical['host'] or canonical['host_alt'][0]
+# CORRECCIÓN CRÍTICA: Verificar host válido al inicio
+host = canonical['host']
+if not host:
+    # Probar hosts alternativos
+    for test_host in canonical['host_alt']:
+        try:
+            test_response = httptools.downloadpage(test_host, timeout=5)
+            if test_response.sucess:
+                host = test_host
+                config.set_setting("current_host", host, 'olimpotorrent')
+                break
+        except:
+            continue
+    
+    # Si no funciona ninguno, usar el primero como fallback
+    if not host:
+        host = canonical['host_alt'][0]
+
 __channel__ = canonical['channel']
 encoding = "utf-8"
 
-def join_url(base_url, path):
-    """Helper para concatenar URLs correctamente"""
-    if path.startswith('http'):
-        return path
-    elif path.startswith('/'):
-        return base_url + path
-    else:
-        return base_url.rstrip('/') + '/' + path.lstrip('/')
-
-def is_detail_url(url):
-    """Verificar si es URL de detalle de película"""
-    # Patrones ampliados para capturar más URLs de películas válidas
-    detail_patterns = ['/pelicula/', '/torrent/', '/peliculas/', '/descargar/', '/movie/', 
-                      '/download/', '/film/', '/ver-', '/watch-']
-    return any(pattern in url.lower() for pattern in detail_patterns)
-
-def is_listing_url(url):
-    """Verificar si es URL de listado/categoría (a evitar)"""
-    # Filtros más específicos - excluir solo listados obvios, no detalles
-    listing_patterns = ['/category/', '/categoria/', '/tag/', '/page/', '/year/', 
-                       '/genero/', '/estrenos/', '/autor/', '/archive/', '/fecha/']
-    # Excluir /peliculas/ de los filtros para permitir URLs como /peliculas/titulo-pelicula/
-    return any(pattern in url.lower() for pattern in listing_patterns)
-
-def is_year_title(title):
-    """Verificar si el título es solo un año"""
-    return re.match(r'^\d{4}$', title.strip())
-
 def mainlist(item):
+    """Menú principal del canal"""
     logger.info()
+    
+    # CRÍTICO: Inicializar autoplay correctamente
     autoplay.init(item.channel, list_servers, list_quality)
     
     itemlist = []
     
+    # Opción principal de películas
     itemlist.append(Item(
         channel=item.channel, 
-        title="Novedades", 
+        title="Películas", 
         action="peliculas", 
-        url=host + "/peliculas/",
-        thumbnail=get_thumb("newest", auto=True)
+        url=host + "/",
+        thumbnail=get_thumb("movies", auto=True)
     ))
     
+    # Búsqueda
     itemlist.append(Item(
         channel=item.channel, 
         title="Buscar", 
         action="search", 
-        url=host + "/?s=",
         thumbnail=get_thumb("search", auto=True)
     ))
     
+    # AÑADIDO: Configuración para cambiar hosts
     itemlist.append(Item(
         channel=item.channel, 
-        title="", 
-        action=""
+        title="Configuración", 
+        action="configuracion",
+        thumbnail=get_thumb("setting", auto=True)
     ))
     
-    itemlist.append(Item(
-        channel=item.channel, 
-        title="[COLOR yellow]NOTA: Enlaces magnet para cliente torrent[/COLOR]", 
-        action=""
-    ))
-    
+    # Mostrar opción de autoplay
     autoplay.show_option(item.channel, itemlist)
     
     return itemlist
 
 def newest(categoria):
-    logger.info()
+    """FUNCIÓN CRÍTICA: Esta debe funcionar para que el canal aparezca en Alfa"""
+    logger.info("Obteniendo newest para categoria: %s" % categoria)
+    
     itemlist = []
-    # CRÍTICO: Crear item con channel válido para que aparezca en Alfa
-    item = Item(channel=__channel__)
     
     try:
         if categoria in ['peliculas', 'latino']:
-            item.url = host + "/peliculas/"
-            itemlist = peliculas(item)
-            # Filtrar solo contenido reproducible (no paginación ni navegación)
-            itemlist = [i for i in itemlist if i.action == "findvideos"]
-            # Limitar a primeros 15 elementos para newest
-            if len(itemlist) > 15:
-                itemlist = itemlist[:15]
+            # Crear item con todos los parámetros necesarios
+            item = Item(
+                channel=__channel__,
+                action="peliculas",
+                url=host + "/"
+            )
+            
+            # Obtener películas
+            temp_list = peliculas(item)
+            
+            # Filtrar solo items válidos para newest
+            for movie_item in temp_list:
+                if (movie_item.action == "findvideos" and
+                    movie_item.contentTitle and 
+                    len(movie_item.contentTitle.strip()) > 2 and
+                    movie_item.url and
+                    'siguiente' not in movie_item.title.lower()):
+                    
+                    itemlist.append(movie_item)
+                    
+                    # Limitar a 15 items para newest
+                    if len(itemlist) >= 15:
+                        break
+            
+            logger.info("Newest devuelve %d películas válidas" % len(itemlist))
+            
     except Exception as e:
         logger.error("Error en newest: %s" % str(e))
-        return []
-        
+        itemlist = []
+    
     return itemlist
 
 def search(item, texto):
-    logger.info()
+    """Función de búsqueda"""
+    logger.info("Buscando: %s" % texto)
     
     if not texto:
         return []
     
+    # Preparar texto de búsqueda
     texto = texto.replace(" ", "+")
     item.url = host + "/?s=" + texto
     
-    return buscar_peliculas(item)
+    try:
+        # Usar la misma función que peliculas pero con URL de búsqueda
+        return peliculas(item)
+    except Exception as e:
+        logger.error("Error en búsqueda: %s" % str(e))
+        return []
 
 def peliculas(item):
-    logger.info()
+    """Función principal para obtener películas"""
+    logger.info("Obteniendo películas de: %s" % item.url)
     
     itemlist = []
     
     try:
-        data = httptools.downloadpage(item.url, encoding=encoding, canonical=canonical).data
+        # Intentar obtener datos con manejo robusto de errores
+        data = None
+        current_url = item.url
         
-        # Buscar posts/artículos de películas con contexto más específico
-        # Patrón 1: Enlaces dentro de títulos de posts
-        patron = r'<(?:h[1-4]|div)[^>]*(?:class="[^"]*(?:title|post|entry)[^"]*"[^>]*)?[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([^<]{3,})</a>\s*</(?:h[1-4]|div)>'
-        matches = re.findall(patron, data, re.IGNORECASE)
+        # Probar con host actual primero
+        try:
+            response = httptools.downloadpage(current_url, canonical=canonical)
+            if response.sucess and response.data:
+                data = response.data
+        except Exception as e:
+            logger.error("Error con URL actual: %s" % str(e))
         
-        # Patrón 2: Si no encuentra, buscar en contenedores de posts
-        if not matches:
-            patron_post = r'<(?:article|div)[^>]*class="[^"]*(?:post|entry|movie)[^"]*"[^>]*>.*?<a[^>]+href="([^"]+)"[^>]*>([^<]{3,})</a>.*?</(?:article|div)>'
-            matches = re.findall(patron_post, data, re.IGNORECASE | re.DOTALL)
+        # Si no funciona, probar hosts alternativos
+        if not data:
+            global host
+            for alt_host in canonical['host_alt']:
+                try:
+                    alt_url = current_url.replace(host, alt_host)
+                    response = httptools.downloadpage(alt_url, canonical=canonical)
+                    if response.sucess and response.data:
+                        data = response.data
+                        host = alt_host
+                        config.set_setting("current_host", host, 'olimpotorrent')
+                        logger.info("Host cambiado a: %s" % host)
+                        break
+                except Exception as e:
+                    logger.error("Error con host %s: %s" % (alt_host, str(e)))
         
-        for url, title in matches:
-            url = join_url(host, url)
+        if not data:
+            logger.error("No se pudieron obtener datos de ningún host")
+            return []
+        
+        logger.info("Datos obtenidos correctamente (%d caracteres)" % len(data))
+        
+        # PATRONES MÚLTIPLES para máxima compatibilidad
+        patterns = [
+            # WordPress posts con títulos en H1-H6
+            r'<h[1-6][^>]*>\s*<a[^>]*href=["\']([^"\']+)["\'][^>]*>([^<]+)</a>',
+            # Divs con clases de post/entry/movie
+            r'<div[^>]*class=["\'][^"\']*(?:post|entry|movie|torrent)[^"\']*["\'][^>]*>.*?<a[^>]*href=["\']([^"\']+)["\'][^>]*>([^<]+)</a>',
+            # Títulos en spans/divs con clase title
+            r'<(?:span|div)[^>]*class=["\'][^"\']*title[^"\']*["\'][^>]*>.*?<a[^>]*href=["\']([^"\']+)["\'][^>]*>([^<]+)</a>',
+            # Enlaces con atributo title
+            r'<a[^>]*href=["\']([^"\']+)["\'][^>]*title=["\']([^"\']+)["\'][^>]*>',
+            # Patrón genérico para cualquier enlace con texto
+            r'<a[^>]*href=["\']([^"\']+)["\'][^>]*>([^<]{4,60})</a>'
+        ]
+        
+        all_matches = []
+        for pattern in patterns:
+            matches = re.findall(pattern, data, re.IGNORECASE | re.DOTALL)
+            all_matches.extend(matches)
+        
+        logger.info("Total de enlaces encontrados: %d" % len(all_matches))
+        
+        # Procesar enlaces encontrados
+        processed_urls = set()  # Evitar duplicados
+        
+        for url, title in all_matches:
+            # Limpiar URL y título
+            if not url.startswith('http'):
+                if url.startswith('/'):
+                    url = host.rstrip('/') + url
+                else:
+                    url = host.rstrip('/') + '/' + url.lstrip('/')
+            
             title = scrapertools.htmlclean(title).strip()
             
-            # Filtrar solo URLs de películas reales, excluir listados y años
-            if (title and url and len(title) > 3 and 
-                is_detail_url(url) and 
-                not is_listing_url(url) and 
-                not is_year_title(title)):
+            # FILTROS DE CALIDAD para solo películas válidas
+            if (url and title and 
+                len(title) > 3 and 
+                len(title) < 100 and  # Evitar títulos muy largos
+                url not in processed_urls and
+                is_movie_url(url) and
+                not is_navigation_title(title)):
                 
-                # Intentar extraer año del título
-                year = '-'
-                year_match = re.search(r'\b(19|20)\d{2}\b', title)
-                if year_match:
-                    year = year_match.group(0)
+                processed_urls.add(url)
                 
-                itemlist.append(Item(
-                    channel=item.channel or __channel__,  # Asegurar channel válido
+                # Extraer año si está presente
+                year = extract_year(title)
+                
+                # Crear item de película
+                movie_item = Item(
+                    channel=item.channel or __channel__,
                     action="findvideos",
                     title=title,
-                    contentTitle=title,
+                    contentTitle=clean_title(title),
                     url=url,
                     contentType="movie",
                     thumbnail="",
                     infoLabels={'year': year}
-                ))
-        
-        # Si no encontramos películas con el patrón específico, intentar patrón genérico
-        if not itemlist:
-            patron_generico = r'<a[^>]*href="([^"]+)"[^>]*title="([^"]*)"[^>]*>'
-            matches = re.findall(patron_generico, data, re.IGNORECASE)
-            
-            for url, title in matches:
-                url = join_url(host, url)
-                title = scrapertools.htmlclean(title).strip()
+                )
                 
-                # Aplicar los mismos filtros estrictos
-                if (title and url and len(title) > 3 and 
-                    is_detail_url(url) and 
-                    not is_listing_url(url) and 
-                    not is_year_title(title)):
-                    
-                    # Intentar extraer año del título
-                    year = '-'
-                    year_match = re.search(r'\b(19|20)\d{2}\b', title)
-                    if year_match:
-                        year = year_match.group(0)
-                    
-                    itemlist.append(Item(
-                        channel=item.channel or __channel__,  # Asegurar channel válido
-                        action="findvideos", 
-                        title=title,
-                        contentTitle=title,
-                        url=url,
-                        contentType="movie",
-                        thumbnail="",
-                        infoLabels={'year': year}
-                    ))
+                itemlist.append(movie_item)
         
-        # Buscar enlaces de paginación con patrones expandidos
-        patron_next = r'<a[^>]*href="([^"]*)"[^>]*>(?:Siguiente|Next|&gt;|›|Older\s+Posts|»|More|→)</a>|<a[^>]*class="[^"]*(?:next|older)[^"]*"[^>]*href="([^"]*)"[^>]*|<a[^>]*rel="next"[^>]*href="([^"]*)"[^>]*|<a[^>]*aria-label="Next[^"]*"[^>]*href="([^"]*)"[^>]*'
-        next_matches = re.findall(patron_next, data, re.IGNORECASE)
+        # Buscar paginación
+        pagination_patterns = [
+            r'<a[^>]*href=["\']([^"\']+)["\'][^>]*>(?:Siguiente|Next|&gt;|›|»|→)</a>',
+            r'<a[^>]*class=["\'][^"\']*next[^"\']*["\'][^>]*href=["\']([^"\']+)["\']',
+            r'<a[^>]*rel=["\']next["\'][^>]*href=["\']([^"\']+)["\']'
+        ]
         
-        if next_matches:
-            # Procesar múltiples grupos de captura del regex expandido
-            for next_match in next_matches:
-                next_url = None
-                for captured_url in next_match:
-                    if captured_url and captured_url.strip():
-                        next_url = captured_url
-                        break
-                
-                if next_url:
-                    next_url = join_url(host, next_url)
-                    
-                    itemlist.append(Item(
-                        channel=item.channel or __channel__,
-                        action="peliculas",
-                        title="Siguiente >>>",
-                        url=next_url,
-                        thumbnail=get_thumb("next", auto=True)
-                    ))
-                    break  # Solo agregar una página siguiente
-        
-        # Configurar información con TMDB
-        tmdb.set_infoLabels_itemlist(itemlist, True)
-        
-    except Exception as e:
-        logger.error("Error al obtener películas: %s" % str(e))
-        
-    return itemlist
-
-def buscar_peliculas(item):
-    logger.info()
-    
-    itemlist = []
-    
-    try:
-        data = httptools.downloadpage(item.url, encoding=encoding, canonical=canonical).data
-        
-        # Buscar resultados de búsqueda usando los mismos patrones mejorados
-        patron = r'<(?:h[1-4]|div)[^>]*(?:class="[^"]*(?:title|post|entry)[^"]*"[^>]*)?[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([^<]{3,})</a>\s*</(?:h[1-4]|div)>'
-        matches = re.findall(patron, data, re.IGNORECASE)
-        
-        # Patrón fallback si no encuentra
-        if not matches:
-            patron_fallback = r'<h[0-9][^>]*><a[^>]*href="([^"]+)"[^>]*>([^<]+)</a></h[0-9]>'
-            matches = re.findall(patron_fallback, data, re.IGNORECASE)
-        
-        for url, title in matches:
-            url = join_url(host, url)
-            title = scrapertools.htmlclean(title).strip()
-            
-            # Filtrar solo URLs de películas reales, excluir listados y años
-            if (title and url and len(title) > 3 and 
-                is_detail_url(url) and 
-                not is_listing_url(url) and 
-                not is_year_title(title)):
-                
-                # Intentar extraer año del título
-                year = '-'
-                year_match = re.search(r'\b(19|20)\d{2}\b', title)
-                if year_match:
-                    year = year_match.group(0)
+        for pag_pattern in pagination_patterns:
+            next_match = re.search(pag_pattern, data, re.IGNORECASE)
+            if next_match:
+                next_url = next_match.group(1)
+                if not next_url.startswith('http'):
+                    next_url = host.rstrip('/') + next_url if next_url.startswith('/') else host.rstrip('/') + '/' + next_url
                 
                 itemlist.append(Item(
-                    channel=item.channel,
-                    action="findvideos",
-                    title=title,
-                    contentTitle=title,
-                    url=url,
-                    contentType="movie", 
-                    thumbnail="",
-                    infoLabels={'year': year}
+                    channel=item.channel or __channel__,
+                    action="peliculas",
+                    title="Siguiente >>>",
+                    url=next_url,
+                    thumbnail=get_thumb("next", auto=True)
                 ))
+                break
         
-        # Si no hay resultados con el patrón específico, intentar patrón más amplio
-        if not itemlist:
-            patron_amplio = r'href="([^"]+)"[^>]*>([^<]+)<'
-            matches = re.findall(patron_amplio, data, re.IGNORECASE)
-            
-            for url, title in matches:
-                url = join_url(host, url)
-                
-                title = scrapertools.htmlclean(title).strip()
-                
-                # Aplicar los mismos filtros estrictos
-                if (title and url and len(title) > 3 and 
-                    is_detail_url(url) and 
-                    not is_listing_url(url) and 
-                    not is_year_title(title)):
-                    
-                    # Intentar extraer año del título
-                    year = '-'
-                    year_match = re.search(r'\b(19|20)\d{2}\b', title)
-                    if year_match:
-                        year = year_match.group(0)
-                    
-                    itemlist.append(Item(
-                        channel=item.channel,
-                        action="findvideos",
-                        title=title,
-                        contentTitle=title,
-                        url=url,
-                        contentType="movie",
-                        thumbnail="",
-                        infoLabels={'year': year}
-                    ))
+        logger.info("Películas procesadas: %d" % len([i for i in itemlist if i.action == "findvideos"]))
         
-        # Configurar información con TMDB
-        tmdb.set_infoLabels_itemlist(itemlist, True)
+        # Configurar información con TMDB solo si hay resultados
+        if itemlist:
+            tmdb.set_infoLabels_itemlist(itemlist, True)
         
     except Exception as e:
-        logger.error("Error en búsqueda: %s" % str(e))
-        
+        logger.error("Error general en peliculas: %s" % str(e))
+        import traceback
+        logger.error("Traceback: %s" % traceback.format_exc())
+    
     return itemlist
 
 def findvideos(item):
-    logger.info()
+    """Buscar enlaces de video (magnets)"""
+    logger.info("Buscando videos en: %s" % item.url)
     
     itemlist = []
     
     try:
-        data = httptools.downloadpage(item.url, encoding=encoding, canonical=canonical).data
+        # Obtener página del detalle
+        response = httptools.downloadpage(item.url, canonical=canonical)
+        if not response.sucess or not response.data:
+            logger.error("Error obteniendo página de video")
+            return []
         
-        # Buscar enlaces magnet en la página (soporta hex y base32)
-        patron_magnet = r'magnet:\?xt=urn:btih:[a-fA-F0-9]{40}[^"\'<>\s]*|magnet:\?xt=urn:btih:[A-Z2-7]{32}[^"\'<>\s]*'
-        magnets = re.findall(patron_magnet, data, re.IGNORECASE)
+        data = response.data
+        logger.info("Página obtenida, buscando magnets...")
         
-        # También buscar en atributos data-*
-        patron_data = r'data-[^=]*="(magnet:\?xt=urn:btih:[a-fA-F0-9]{40}[^"]*|magnet:\?xt=urn:btih:[A-Z2-7]{32}[^"]*)"'
-        data_magnets = re.findall(patron_data, data, re.IGNORECASE)
-        magnets.extend(data_magnets)
+        # PATRONES EXHAUSTIVOS para magnets
+        magnet_patterns = [
+            r'magnet:\?xt=urn:btih:[a-fA-F0-9]{40}[^\s<>"\']*',  # Hash hex
+            r'magnet:\?xt=urn:btih:[A-Z2-7]{32}[^\s<>"\']*',     # Hash base32
+            r'href=["\']?(magnet:\?xt=urn:btih:[a-fA-F0-9]{40}[^"\']*)',
+            r'data-[^=]*=["\']?(magnet:\?xt=urn:btih:[a-fA-F0-9]{40}[^"\']*)',
+            r'onclick=["\'][^"\']*?(magnet:\?xt=urn:btih:[a-fA-F0-9]{40}[^"\']*)'
+        ]
         
-        # Deduplicar enlaces
-        magnets = list(set(magnets))
+        found_magnets = set()
+        for pattern in magnet_patterns:
+            matches = re.findall(pattern, data, re.IGNORECASE)
+            for match in matches:
+                if isinstance(match, tuple):
+                    match = match[0] if match[0] else (match[1] if len(match) > 1 else '')
+                if match and match.startswith('magnet:'):
+                    found_magnets.add(match)
         
-        # Buscar en onclick
-        patron_onclick = r'onclick="[^"]*magnet:\?xt=urn:btih:[a-fA-F0-9]{40}[^"]*"|onclick="[^"]*magnet:\?xt=urn:btih:[A-Z2-7]{32}[^"]*"'
-        onclick_matches = re.findall(patron_onclick, data, re.IGNORECASE)
-        for onclick in onclick_matches:
-            magnet_match = re.search(r'magnet:\?xt=urn:btih:[a-fA-F0-9]{40}[^"]*|magnet:\?xt=urn:btih:[A-Z2-7]{32}[^"]*', onclick)
-            if magnet_match:
-                magnets.append(magnet_match.group(0))
+        logger.info("Magnets encontrados: %d" % len(found_magnets))
         
-        # Procesar cada enlace magnet encontrado
-        for magnet_url in magnets:
-            if not magnet_url.startswith('magnet:'):
-                continue
-                
-            # Extraer información del nombre del archivo en el magnet
+        # Procesar cada magnet
+        for magnet_url in found_magnets:
             try:
-                parsed = urlparse(magnet_url)
-                query_params = parse_qs(parsed.query)
-                filename = query_params.get('dn', [''])[0]
-            except:
-                filename = "Archivo Torrent"
-            
-            # Extraer calidad del nombre del archivo
-            quality = "Desconocida"
-            if filename:
-                if '4K' in filename.upper() or '2160p' in filename.upper():
-                    quality = "4K"
-                elif '1080p' in filename.upper():
-                    quality = "1080p" 
-                elif '720p' in filename.upper():
-                    quality = "720p"
-                elif 'WEB-DL' in filename.upper():
-                    quality = "WEB-DL"
-                elif 'BluRay' in filename.upper() or 'BLURAY' in filename.upper():
-                    quality = "BluRay"
-                elif 'DVDRIP' in filename.upper():
-                    quality = "DVDRip"
-            
-            # Extraer idioma y asignar código
-            language = "lat"  # Por defecto Latino
-            if filename:
-                if 'latino' in filename.lower() or 'lat' in filename.lower():
-                    language = "lat"
-                elif 'español' in filename.lower() or 'esp' in filename.lower() or 'castellano' in filename.lower():
-                    language = "esp"
-                elif 'dual' in filename.lower():
-                    language = "dual"
-            
-            # Extraer tamaño aproximado
-            size = "Desconocido"
-            size_match = re.search(r'(\d+(?:\.\d+)?)\s*(GB|MB)', filename, re.IGNORECASE)
-            if size_match:
-                size = size_match.group(0)
-            
-            # Crear título descriptivo
-            title = "[COLOR cyan]%s[/COLOR] " % quality
-            if size != "Desconocido":
-                title += "[COLOR yellow]%s[/COLOR] " % size
-            # Convertir código de idioma a nombre para mostrar
-            language_name = {v: k for k, v in IDIOMAS.items()}.get(language, "Latino")
-            title += "[COLOR lime](%s)[/COLOR] " % language_name
-            title += "TORRENT"
-            
-            # Crear URL para Elementum si está disponible
-            elementum_url = "plugin://plugin.video.elementum/play?uri=" + quote(magnet_url)
-            
-            itemlist.append(Item(
-                channel=item.channel,
-                action="play",
-                title=title,
-                url=elementum_url,
-                server="elementum",
-                contentTitle=item.contentTitle,
-                contentThumbnail=item.thumbnail,
-                quality=quality,
-                language=language,
-                magnet_url=magnet_url,
-                filename=filename,
-                infoLabels=item.infoLabels
-            ))
-        
-        # Si no se encontraron magnets, buscar en todo el HTML de forma más agresiva
-        if not itemlist:
-            # Decodificar entidades HTML que puedan contener magnets
-            data_clean = scrapertools.htmlclean(data)
-            patron_magnet_amplio = r'magnet:\?[^\s<>"\']*'
-            magnets_amplio = re.findall(patron_magnet_amplio, data_clean, re.IGNORECASE)
-            
-            for magnet_url in magnets_amplio:
-                if 'xt=urn:btih:' in magnet_url:
-                    try:
-                        parsed = urlparse(magnet_url)
-                        query_params = parse_qs(parsed.query)
-                        filename = query_params.get('dn', ['Torrent'])[0]
-                    except:
-                        filename = "Torrent"
-                    
-                    elementum_url = "plugin://plugin.video.elementum/play?uri=" + quote(magnet_url)
-                    
-                    itemlist.append(Item(
-                        channel=item.channel,
-                        action="play",
-                        title="[COLOR lime]TORRENT[/COLOR] - " + filename,
-                        url=elementum_url,
-                        server="elementum",
-                        contentTitle=item.contentTitle,
-                        contentThumbnail=item.thumbnail,
-                        magnet_url=magnet_url,
-                        filename=filename,
-                        infoLabels=item.infoLabels
-                    ))
-        
-        # Aplicar filtros
-        itemlist = filtertools.get_links(itemlist, item, list_language)
-        
-        # Configurar autoplay
-        autoplay.start(itemlist, item)
+                # Extraer información del magnet
+                info = extract_magnet_info(magnet_url)
+                
+                # Crear título descriptivo
+                title_parts = []
+                if info['quality']:
+                    title_parts.append("[COLOR cyan]%s[/COLOR]" % info['quality'])
+                if info['size']:
+                    title_parts.append("[COLOR yellow]%s[/COLOR]" % info['size'])
+                
+                language_name = {v: k for k, v in IDIOMAS.items()}.get(info['language'], 'Latino')
+                title_parts.append("[COLOR lime]%s[/COLOR]" % language_name)
+                title_parts.append("TORRENT")
+                
+                title = " ".join(title_parts)
+                
+                # URL para Elementum
+                elementum_url = "plugin://plugin.video.elementum/play?uri=" + quote(magnet_url)
+                
+                itemlist.append(Item(
+                    channel=item.channel,
+                    action="play",
+                    title=title,
+                    url=elementum_url,
+                    server="elementum",
+                    contentTitle=item.contentTitle,
+                    quality=info['quality'],
+                    language=info['language'],
+                    infoLabels=item.infoLabels
+                ))
+                
+            except Exception as e:
+                logger.error("Error procesando magnet: %s" % str(e))
         
         if not itemlist:
             itemlist.append(Item(
@@ -483,8 +378,12 @@ def findvideos(item):
                 action=""
             ))
         
+        # Aplicar filtros
+        itemlist = filtertools.get_links(itemlist, item, list_language)
+        autoplay.start(itemlist, item)
+        
     except Exception as e:
-        logger.error("Error al buscar videos: %s" % str(e))
+        logger.error("Error en findvideos: %s" % str(e))
         itemlist.append(Item(
             channel=item.channel,
             title="[COLOR red]Error: %s[/COLOR]" % str(e),
@@ -494,8 +393,139 @@ def findvideos(item):
     return itemlist
 
 def play(item):
+    """Reproducir elemento"""
     logger.info()
-    
-    # Devolver el item con la URL de Elementum para reproducción
     item.thumbnail = item.contentThumbnail
     return [item]
+
+def configuracion(item):
+    """Configuración del canal"""
+    logger.info()
+    
+    itemlist = []
+    
+    itemlist.append(Item(
+        channel=item.channel,
+        title="[COLOR yellow]Hosts disponibles:[/COLOR]",
+        action=""
+    ))
+    
+    for alt_host in canonical['host_alt']:
+        status = " [COLOR green](Actual)[/COLOR]" if alt_host == host else ""
+        itemlist.append(Item(
+            channel=item.channel,
+            title=alt_host + status,
+            action="cambiar_host",
+            url=alt_host
+        ))
+    
+    return itemlist
+
+def cambiar_host(item):
+    """Cambiar host del canal"""
+    logger.info()
+    
+    global host
+    host = item.url
+    config.set_setting("current_host", host, 'olimpotorrent')
+    
+    from platformcode import platformtools
+    platformtools.dialog_ok("Olimpotorrent", "Host cambiado a:\n%s" % host)
+    
+    return []
+
+# FUNCIONES AUXILIARES
+
+def is_movie_url(url):
+    """Verificar si es URL de película válida"""
+    movie_indicators = ['/pelicula/', '/torrent/', '/descargar/', '/download/', '/ver-']
+    avoid_indicators = ['/page/', '/category/', '/tag/', '/author/', '/search/', '/feed/', '.xml', '.rss']
+    
+    url_lower = url.lower()
+    
+    # Debe tener al menos un indicador de película
+    has_movie_indicator = any(indicator in url_lower for indicator in movie_indicators)
+    # No debe tener indicadores a evitar
+    has_avoid_indicator = any(indicator in url_lower for indicator in avoid_indicators)
+    
+    return has_movie_indicator and not has_avoid_indicator
+
+def is_navigation_title(title):
+    """Verificar si es título de navegación (no película)"""
+    navigation_terms = ['página', 'siguiente', 'anterior', 'home', 'inicio', 'categoría', 
+                       'buscar', 'search', 'more', 'ver más', 'página siguiente']
+    
+    title_lower = title.lower().strip()
+    
+    # Evitar títulos que son solo años
+    if re.match(r'^\d{4}$', title_lower):
+        return True
+    
+    # Evitar títulos de navegación
+    return any(term in title_lower for term in navigation_terms)
+
+def extract_year(title):
+    """Extraer año del título"""
+    year_match = re.search(r'\b(19|20)\d{2}\b', title)
+    return year_match.group(0) if year_match else '-'
+
+def clean_title(title):
+    """Limpiar título eliminando año y extras"""
+    # Eliminar año entre paréntesis o corchetes
+    title = re.sub(r'\s*[\[\(]\d{4}[\]\)]\s*', ' ', title)
+    # Eliminar calidades
+    title = re.sub(r'\s*\b(1080p|720p|4K|BluRay|DVDRip|WEB-DL)\b\s*', ' ', title, flags=re.IGNORECASE)
+    # Limpiar espacios múltiples
+    title = ' '.join(title.split())
+    return title.strip()
+
+def extract_magnet_info(magnet_url):
+    """Extraer información del magnet link"""
+    info = {
+        'filename': 'Torrent',
+        'quality': 'SD',
+        'language': 'lat',
+        'size': ''
+    }
+    
+    try:
+        parsed = urlparse(magnet_url)
+        query_params = parse_qs(parsed.query)
+        filename = query_params.get('dn', [''])[0]
+        
+        if filename:
+            info['filename'] = filename
+            
+            # Extraer calidad
+            filename_upper = filename.upper()
+            if '4K' in filename_upper or '2160P' in filename_upper:
+                info['quality'] = '4K'
+            elif '1080P' in filename_upper:
+                info['quality'] = '1080p'
+            elif '720P' in filename_upper:
+                info['quality'] = '720p'
+            elif 'WEB-DL' in filename_upper:
+                info['quality'] = 'WEB-DL'
+            elif 'BLURAY' in filename_upper:
+                info['quality'] = 'BluRay'
+            elif 'DVDRIP' in filename_upper:
+                info['quality'] = 'DVDRip'
+            
+            # Extraer idioma
+            filename_lower = filename.lower()
+            if 'latino' in filename_lower or 'lat' in filename_lower:
+                info['language'] = 'lat'
+            elif 'español' in filename_lower or 'esp' in filename_lower or 'castellano' in filename_lower:
+                info['language'] = 'esp'
+            elif 'dual' in filename_lower:
+                info['language'] = 'dual'
+            
+            # Extraer tamaño
+            size_match = re.search(r'(\d+(?:\.\d+)?)\s*(GB|MB)', filename, re.IGNORECASE)
+            if size_match:
+                info['size'] = size_match.group(0)
+                
+    except Exception as e:
+        logger.error("Error extrayendo info de magnet: %s" % str(e))
+    
+    return info
